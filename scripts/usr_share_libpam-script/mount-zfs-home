@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+
+home_zpool="SSD1"
+home_dataset="UserHomes"
+user_home_dataset="${home_zpool}/${home_dataset}/${PAM_USER}"
+user_home_mountpoint=$(getent passwd "${PAM_USER}" | awk 'BEGIN{FS=":"}{print $(NF-1)}')
+uid=$(id -u "${PAM_USER}")
+
+# Users with ID's less than 1000 are typically system users
+if [ $uid -lt 1000 ]; then
+  exit 0
+fi
+
+function log {
+  echo "${@}" >>/tmp/$0
+}
+
+if [ $(zfs list | grep -c "${user_home_dataset}") -gt 0 ]; then
+  log "Found a home dataset for '${PAM_USER}' in '${user_home_dataset}'"
+
+  #TODO: check that mountpoint property is correct (legacy)
+
+  #TODO: check that overlay property is set to "yes"
+
+  # Is the dataset already mounted
+  if [ $(zfs get mounted "${user_home_dataset}" | tail -1 | awk '{print $3}' | grep -c "yes") -gt 0 ]; then
+    log "Dataset for '${PAM_USER}' is already mounted."
+    exit 0
+  else
+    # Is the dataset encrypted?
+    if [ $(zfs get encryptionroot "${user_home_dataset}" | tail -1 | awk '{print $3}' | grep -c "{$home_zpool}") -gt 0 ]; then
+      log "Dataset for '${PAM_USER}' is encrypted."
+      encryptionroot=$(zfs get encryptionroot "${user_home_dataset}" | tail -1 | awk '{print $3}')
+      # Is the key already loaded?
+      if [ $(zfs get keystatus "${encryptionroot}" | tail -1 | awk '{print $3}' | grep -c "available") -gt 0 ]; then
+        log "Encryption key for '${PAM_USER}' home dataset is already loaded"
+      else
+        log "Encryption key for '${PAM_USER}' home dataset is not already loaded."
+
+	#TODO: Load the key from ${PAM_AUTHOK}
+      fi
+    fi
+    
+    #TODO: Ready to mount the dataset
+    #mount -t zfs "${user_home_dataset}" "${user_home_mountpoint}"
+  fi
+else
+  log "There is no home dataset for '${PAM_USER}'"
+
+  #TODO: Create a dataset using ${PAM_AUTHOK} as the encryption key
+  # zfs create -o encryption=on -o keyformat=passphrase -o mountpoint=legacy -o overlay=yes "${user_home_dataset}"
+
+  #TODO: Copy in a .skel profile
+fi

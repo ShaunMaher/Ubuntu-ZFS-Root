@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+
+target_zpool="SSD1"
+target_volume="${target_zpool}/OS/kdeneon/ROOT"
+target_mountpoint="/mnt/target"
+
+if [ $(zpool list | grep -c "${target_zpool}") -lt 1 ]; then
+  zpool import SSD1
+fi
+
+zfs_enc_root=$(zfs get encryptionroot "${target_volume}" | tail -1 | awk '{print $3}')
+zfs_enc_keystatus=$(zfs get keystatus "${zfs_enc_root}" | tail -1 | awk '{print $3}' | grep -c '^available$')
+if [ $zfs_enc_keystatus -lt 1 ]; then
+  zfs load-key "${zfs_enc_root}"
+fi
+
+if [ $(mount | grep -c "${target_mountpoint}") -lt 1 ]; then
+  mount -t zfs SSD1/OS/kdeneon/ROOT "${target_mountpoint}"
+fi
+mount --rbind /dev /mnt/target/dev
+mount --rbind /proc /mnt/target/proc
+mount --rbind /sys /mnt/target/sys
+mount --rbind /dev/pts /mnt/target/dev/pts
+mount --rbind /boot /mnt/target/boot
+mount --rbind /boot/efi /mnt/target/boot/efi
