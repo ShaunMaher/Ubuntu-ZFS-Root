@@ -40,8 +40,9 @@ partitioned it:
 Number  Start   End     Size    File system  Name       Flags
  1      1049kB  48.2MB  47.2MB  fat32        esp        boot, esp
  2      48.2MB  96.5MB  48.2MB               bios_grub  bios_grub
- 3      96.5MB  1096MB  999MB   ext2         boot
- 4      1096MB  7000MB  5905MB  ext2         rescue
+ 3      96.5MB  1096MB  999MB   ext4         boot
+ 4      1096MB  7000MB  5905MB  ext4         rescue
+ 5      7000MB  120GB   113GB   zfs          SSD1
 ```
 
 ## Install Rescue OS
@@ -49,6 +50,7 @@ I now just install KDE Neon into partition 4 (labelled "rescue") and restart
 when it's done.
 
 ## Post Rescue OS Install
+### Building ZFS tools and kernel module from source
 ```
 sudo apt install zfsutils-linux dkms zfs-initramfs dh-make
 sudo apt install python3-distutils dh-autoreconf tzdata uuid-dev libblkid-dev libssl-dev zlib1g-dev
@@ -91,6 +93,7 @@ TODO: Grub settings
 sudo update-initramfs -c -k all
 ```
 
+### Create the zpool that the normal OS will be installed to
 ```
 sudo zpool create -o ashift=12 -d \
       -o feature@async_destroy=enabled \
@@ -144,9 +147,14 @@ Crap! I didn't document the step that goes here.  It was something like:
 sudo apt install $(cat /tmp/package-list)
 ```
 
+Create a user in the new OS (use your own preferred username obviously)
 ```
 sudo adduser shaun
 sudo usermod -a -G sudo shaun
+```
+
+Configure NetworkManager operate as expected on first boot.
+```
 sudo apt purge netplan.io
 sudo rm /usr/lib/NetworkManager/conf.d/10-globally-managed-devices.conf
 ```
@@ -170,7 +178,10 @@ With luck, you should soon be prompted for the password to unlock the ZFS
 dataset and, after you have provided the passphrase, the OS should boot to the
 graphical login screen.
 
-## Permantently add an entry to the Grub menu
+Once you're logged in, you need to repeat the ***"Building ZFS tools and kernel
+module from source"*** section from above on this OS instance.
+
+## Permanently add an entry to the Grub menu
 TODO
 
 ## Troubleshooting
