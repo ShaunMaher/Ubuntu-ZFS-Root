@@ -10,7 +10,7 @@ implemented native ZFS encryption though and I wanted to give it a try.
 
 Because the process requires building the ZFS tools and kernel modules from
 source, doing this repeatedly in the Live CD environment became a real pain.  To
-work around needing a live environment to fall back to is something went wrong,
+work around needing a live environment to fall back to if something went wrong,
 I have a full KDE Neon install in an ext4 partition that I can boot to any time
 something goes wrong.  As I hone the process, I can probably do away with this
 extra partition in future builds.
@@ -169,6 +169,12 @@ Press F10 to boot.
 With luck, you should soon be prompted for the password to unlock the ZFS
 dataset and, after you have provided the passphrase, the OS should boot to the
 graphical login screen.
+
+## Permantently add an entry to the Grub menu
+TODO
+
+## Troubleshooting
+TODO
 
 ## Personalisation
 Everything below this point is just what I do to setup my system the way I like
