@@ -27,11 +27,40 @@ doesn't work properly with encryption enabled.  Instead of something asking for
 the ZFS volume's key, you are dropped to a busybox prompt and asked to mount
 your OS volume yourself.
 
+### A future feature: A ZFS snapshot taken of the root dataset before and after updates are installed
+This would allow for simple roll backs in the event of a package upgrade going
+weird and breaking things.
+
+**Basic idea:**
+
+Copy `scripts/etc_apt_apt.conf.d/50-ZfsSnapshot` to `/etc/apt/apt.conf.d/50-ZfsSnapshot`
+Copy `usr_local_bin/apt-zfs-snapshot` to `/usr/local/bin/apt-zfs-snapshot`
+
+Set the "auto-snapshot=false" flag on all VM datasets:
+```
+while read DS; do sudo zfs set com.sun:auto-snapshot=false ${DS}; done < <(zfs list |grep VM | awk '{print $1}')
+```
+
+Set the "auto-snapshot=false" flag on SWAP:
+```
+sudo zfs set com.sun:auto-snapshot=false SSD1/OS/kdeneon/SWAP
+```
+
+TODO: /boot isn't on ZFS so it doesn't get captured.  Can we take a backup of
+/boot as part of the pre/post process?
+
 ### A future feature: individual encrypted user home datasets
 As well as having my OS root on ZFS, I also want to have each (non-system)
 user's home directory it's own ZFS dataset with the user's password used as the
 encryption key.  Logging in would use the login password to unlock and mount the
 dataset.  This is nowhere near operational yet.  Watch this space.
+
+### A future feature: SSH access to the initramfs environment so that the root volume can be unlocked remotely
+If I'm away from my PC and it gets restarted, I can't remotely enter the ZFS
+encryption password for the root volume.  That means the PC can't finish booting
+and I'm completely locked out until I get home.  It is possible to have an SSH
+server (dropbear or tinyssh) in the initramfs boot environment that you could
+log into, provide the password and continue the boot process.
 
 ## Partitioning
 My target machine has a 120GiB SSD as it's primary disk  This is how I
@@ -181,6 +210,24 @@ graphical login screen.
 Once you're logged in, you need to repeat the ***"Building ZFS tools and kernel
 module from source"*** section from above on this OS instance.
 
+## Add Swap
+```
+sudo zfs create -V 10G -o checksum=off -o compression=off -o dedup=off -o sync=disabled -o primarycache=none SSD1/OS/kdeneon/SWAP
+sudo mkswap /dev/zvol/SSD1/OS/kdeneon/SWAP
+sudo vim /etc/fstab
+```
+```
+/dev/zvol/SSD1/OS/kdeneon/SWAP                         none            swap    sw              0       0
+```
+```
+sudo swapon -a
+```
+
+## Limit ZFS ARC memory usage
+```
+echo "options zfs zfs_arc_max=536870912" | sudo tee -a /etc/modprobe.d/zfs.conf
+```
+
 ## Permanently add an entry to the Grub menu
 TODO
 
@@ -199,6 +246,61 @@ vim ~/.zshrc
 ZSH_THEME="agnoster"
 ```
 
+### Add an action to the KDE panel so that when you mouse over and then scrollwheel, it moves between virtual desktops
+```
+vim .config/plasma-org.kde.plasma.desktop-appletsrc
+```
+Add the last line to this stanza
+```
+[ActionPlugins][1]
+RightButton;NoModifier=org.kde.contextmenu
+wheel:Vertical;NoModifier=org.kde.switchdesktop
+```
+
+### Enable firewall
+```
+sudo ufw enable
+sudo ufw allow ssh
+```
+
+### Extra Packages
+```
+sudo apt install gvfs-backends zenity gvfs-fuse expect
+sudo snap install libreoffice
+```
+
+I found that the Flatpak of Remmina works a bit better than the snap:
+```
+flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+flatpak install --user flathub org.remmina.Remmina
+flatpak run --user org.remmina.Remmina
+```
+
+### Unlock all SSH private keys on login by having their passwords stored in kwallet
+```
+vim .config/autostart/ssh-add.sh
+```
+```
+#!/bin/bash
+
+SSH_ASKPASS=ksshaskpass
+while read identity; do
+  ssh-add "${identity}" </dev/null
+done < <(find ${HOME}/.ssh/identities -maxdepth 1 -mindepth 1 | grep -v '\.pub$')
+```
+```
+chmod +x .config/autostart/ssh-add.sh
+```
+
+The first time the script runs, it will ask for the password for every private
+key file in ${HOME}/.ssh/identities.
+
+Don't forget to have the following in your ~/.ssh/config to prevent the "Too
+many failed authentication attempts" error:
+```
+IdentitiesOnly          yes
+```
+
 ### Libvirt for running local VMs
 ```
 sudo apt install libvirt-bin libvirt-daemon-driver-storage-zfs sgabios ovmf
@@ -214,25 +316,32 @@ For local VM management
 sudo apt install virt-manager
 ```
 
+#### Add a zpool as a location that libvirt can store disks as zvols
+**Upon further reading, I'm convinced that ZVOLs are not the best solution for
+providing VM storage.  Stick with .qcow2 files on ZFS Datasets.**  I still think
+that the additional options for creating the ZFS Datasets for TEMP/SWAP are a
+good approach to optimise throughput for these tasks and minimize disk image
+changes that increase the size of incremental backups.
+
 Create a ZFS dataset for VMs (even though the VMs themselves will use ZVOLs)
 ```
 sudo zfs create SSD1/VMs/libvirt
 ```
 
-### Add a zpool as a location that libvirt can store disks as zvols
+Now let libvirt know about the zpool
 ```
 virsh -c qemu:///system pool-define-as --name SSD1 --type zfs --source-dev SSD1
 virsh -c qemu:///system pool-autostart SSD1
 virsh -c qemu:///system pool-start SSD1
 ```
 
-### Add a shared location (dataset) for .isos, etc.
+#### Add a shared location (dataset) for .isos, etc.
 ```
 sudo zfs create SSD1/VMs/Shared
 virsh -c qemu:///system pool-define-as --name Shared --type dir --target /mnt/zfs/SSD1/VMs/Shared
 ```
 
-### Setup zfs for a new VM
+#### Setup zfs for a new VM
 ```
 VMNAME="neon1.ghanima.net"
 sudo zfs create SSD1/VMs/libvirt/${VMNAME}
@@ -241,7 +350,7 @@ sudo zfs create -V 5G -o checksum=off -o compression=off -o dedup=off -o sync=di
 sudo zfs create -V 2G -o checksum=off -o compression=off -o dedup=off -o sync=disabled -o primarycache=none SSD1/VMs/libvirt/${VMNAME}/TEMP
 ```
 
-### Setup a bridge with NetworkManager
+#### Setup a bridge with NetworkManager
 ```
 nmcli con down 'Wired connection 1'
 nmcli con delete 'Wired connection 1'
@@ -250,7 +359,7 @@ nmcli con add type bridge-slave ifname eno1 con-name eno1 master brLAN
 nmcli con up brLAN
 ```
 
-### Setup the bridge to be available in libvirt
+#### Setup the bridge to be available in libvirt
 ```
 vim /tmp/brLAN.xml
 ```

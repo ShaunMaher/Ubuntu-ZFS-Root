@@ -1,0 +1,18 @@
+#!/bin/bash
+
+while read dataset; do
+  snapshot_enabled=$( \
+    zfs get com.sun:auto-snapshot "${dataset}" | \
+    grep 'com.sun:auto-snapshot' | \
+    awk '{print $3}' \
+  )
+  if [[ ${snapshot_enabled} == *"false"* ]]; then
+    echo "Snapshots disabled for '${dataset}'."
+  else
+    echo "Taking snapshot of '${dataset}'."
+    date=$(date +%Y-%m-%dT%H:%M:%S)
+    zfs snapshot "${dataset}@apt-${1}-install_${date}"
+  fi
+
+# Note: this will not support datasets with spaces in the name
+done < <(zfs list | tail -n +2 | awk '{print $1}')
