@@ -1,0 +1,11 @@
+declare -A userdatasets
+ssdzpool="SSD1"
+userdatasets[_root]="${ssdzpool}/Users/Home/{username}"
+userdatasets[.cache]="${ssdzpool}/Users/Cache/{username}"
+userdatasets[.local]="${ssdzpool}/Users/Home/{username}/.local"
+userdatasets[Desktop]="${ssdzpool}/Users/Home/{username}/Desktop"
+userdatasets[Documents]="${ssdzpool}/Users/Home/{username}/Documents"
+userdatasets[Downloads]="${ssdzpool}/Users/Downloads/{username}"
+userdatasets[Music]="${ssdzpool}/Users/Home/{username}/Music"
+userdatasets[Pictures]="${ssdzpool}/Users/Home/{username}/Pictures"
+userdatasets[Videos]="${ssdzpool}/Users/Home/{username}/Videos"

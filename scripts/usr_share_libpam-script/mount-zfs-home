@@ -1,20 +1,39 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
 home_zpool="SSD1"
 home_dataset="UserHomes"
-user_home_dataset="${home_zpool}/${home_dataset}/${PAM_USER}"
+
+# This array defines the structure of a user's home directory.
+declare -A userdatasets
+# By default, a single dataset is created in ${home_zpool}/${home_dataset}
+userdatasets[_root]="${home_zpool}/${home_dataset}/{username}"
+
+#user_home_dataset="${home_zpool}/${home_dataset}/${PAM_USER}"
+
+# To override any of the above settings, define them in 
+#  /etc/default/zfs-userhomes
+if [ -f /etc/default/zfs-userhomes ]; then
+  source /etc/default/zfs-userhomes
+fi
+
+function log {
+  echo "$(date) ${@}" >>/tmp/mount-zfs-home
+  #echo "${@}" | logger
+  #echo "${@}"
+}
+log "libpam-script called: $0, ${PAM_USER}"
+
 user_home_mountpoint=$(getent passwd "${PAM_USER}" | awk 'BEGIN{FS=":"}{print $(NF-1)}')
 uid=$(id -u "${PAM_USER}")
 
 # Users with ID's less than 1000 are typically system users
 if [ $uid -lt 1000 ]; then
+  log "UID for '${PAM_USER}' is less that 1000.  Probably a system user.  Exiting."
   exit 0
 fi
 
-function log {
-  echo "${@}" >>/tmp/$0
-}
-
+user_home_dataset=$(echo "${userdatasets[_root]}" | sed "s/{username}/${PAM_USER}/g")
+log "Expected home dataset for ${PAM_USER}: '${user_home_dataset}'"
 if [ $(zfs list | grep -c "${user_home_dataset}") -gt 0 ]; then
   log "Found a home dataset for '${PAM_USER}' in '${user_home_dataset}'"
 
@@ -46,9 +65,33 @@ if [ $(zfs list | grep -c "${user_home_dataset}") -gt 0 ]; then
   fi
 else
   log "There is no home dataset for '${PAM_USER}'"
+  if [ "${PAM_AUTHTOK}" = "" ]; then
+    log "PAM_AUTHTOK is not set.  Cannot create encrypted datasets without password."
+    exit 0
+  fi
 
-  #TODO: Create a dataset using ${PAM_AUTHOK} as the encryption key
-  # zfs create -o encryption=on -o keyformat=passphrase -o mountpoint=legacy -o overlay=yes "${user_home_dataset}"
+  # TODO: make sure parent datasets exist
+
+  # Create the root dataset for the user's home directory
+  homedataset=$(echo "${userdatasets[_root]}" | sed "s/{username}/${PAM_USER}/g")
+  log "Creating a new home dataset for '${PAM_USER}' in '${homedataset}'"
+  result=$(
+    echo "${PAM_AUTHTOK}" | \
+    zfs create \
+      -o encryption=on \
+      -o keyformat=passphrase \
+      -o mountpoint=legacy \
+      -o overlay=on \
+      "${homedataset}" \
+    2>&1
+  )
+  log "$?: ${result}"
+
+  #for target in "${!userdatasets[@]}"; do
+  #  newdataset=$(echo "${userdatasets[${target}]}" | sed "s/{username}/${PAM_USER}/g")
+  #  log "Creating a new '${target}' dataset for '${PAM_USER}' in '${newdataset}'"
+  #  echo "${PAM_AUTHOK}" | zfs create -o encryption=on -o keyformat=passphrase -o mountpoint=legacy -o overlay=yes "${newdataset}"
+  #done
 
   #TODO: Copy in a .skel profile
 fi
