@@ -27,16 +27,21 @@ doesn't work properly with encryption enabled.  Instead of something asking for
 the ZFS volume's key, you are dropped to a busybox prompt and asked to mount
 your OS volume yourself.
 
+**References:**
+https://wiki.archlinux.org/index.php/ZFS
+
 ### A future feature: A ZFS snapshot taken of the root dataset before and after updates are installed
+**Reference:** https://www.cyberciti.biz/faq/debian-ubuntu-linux-hook-a-script-command-to-apt-get-upgrade-command/
+
 This would allow for simple roll backs in the event of a package upgrade going
 weird and breaking things.
 
 **Basic idea:**
 
 Copy `scripts/etc_apt_apt.conf.d/50-ZfsSnapshot` to `/etc/apt/apt.conf.d/50-ZfsSnapshot`
-Copy `usr_local_bin/apt-zfs-snapshot` to `/usr/local/bin/apt-zfs-snapshot`
+Copy `scripts/usr_local_bin/apt-zfs-snapshot` to `/usr/local/bin/apt-zfs-snapshot`
 
-Set the "auto-snapshot=false" flag on all VM datasets:
+Set the "com.sun:auto-snapshot=false" flag on all VM datasets:
 ```
 while read DS; do sudo zfs set com.sun:auto-snapshot=false ${DS}; done < <(zfs list |grep VM | awk '{print $1}')
 ```
@@ -50,17 +55,47 @@ TODO: /boot isn't on ZFS so it doesn't get captured.  Can we take a backup of
 /boot as part of the pre/post process?
 
 ### A future feature: individual encrypted user home datasets
+**For SSH *authorized_keys* to continue to work:** https://stephenreescarter.net/encrypted-home-directories-ssh-key-authentication/
+
 As well as having my OS root on ZFS, I also want to have each (non-system)
 user's home directory it's own ZFS dataset with the user's password used as the
 encryption key.  Logging in would use the login password to unlock and mount the
 dataset.  This is nowhere near operational yet.  Watch this space.
 
 ### A future feature: SSH access to the initramfs environment so that the root volume can be unlocked remotely
+**Reference:** https://www.pbworks.net/ubuntu-guide-dropbear-ssh-server-to-unlock-luks-encrypted-pc/
+
 If I'm away from my PC and it gets restarted, I can't remotely enter the ZFS
 encryption password for the root volume.  That means the PC can't finish booting
 and I'm completely locked out until I get home.  It is possible to have an SSH
 server (dropbear or tinyssh) in the initramfs boot environment that you could
 log into, provide the password and continue the boot process.
+
+### A future feature: Secure/signed bootloader and kernel, etc.
+**Reference:** https://threat.tevora.com/secure-boot-tpm-2/
+
+It would be possible to trick the owner of a PC setup like the above to reveal
+the encryption passphrase.  You could boot a live OS from a USB drive, do all
+the necessary steps to make the live OS able to create a valid kernel and
+initramfs but inject into the initramfs a modified ZFS unlock script that did
+something nasty with the passphrase after the user entered it.  it could then
+unlock the volume and boot noramlly with the user never being aware that their
+passphrase has been compromised.
+
+To prevent this type of attack we can use the Secure Boot feature of UEFI so
+that the PC will only boot a bootloader/kernel/initramfs/command line that is
+signed.
+
+TPM hardware can also be involved.
+
+TPM hardware can also be used to store the encryption passphrase so that the
+passphrase does not need to be entered on boot.  This is useful for systems that
+are deployed to physically insecure environments that still need to be able to
+boot without user input.  Any change to the boot environment (bootloader,
+kernel, etc.) and the TPM will withhold the passphrase so physical tampering is
+noticed.  I'm not specifically interested in this feature at this stage.
+
+I'm not sure how all of this fits together yet, hence it being a future project.
 
 ## Partitioning
 My target machine has a 120GiB SSD as it's primary disk  This is how I
@@ -182,7 +217,7 @@ sudo adduser shaun
 sudo usermod -a -G sudo shaun
 ```
 
-Configure NetworkManager operate as expected on first boot.
+Configure NetworkManager operate as expected for a desktop system on first boot:
 ```
 sudo apt purge netplan.io
 sudo rm /usr/lib/NetworkManager/conf.d/10-globally-managed-devices.conf
@@ -223,9 +258,120 @@ sudo vim /etc/fstab
 sudo swapon -a
 ```
 
+## Add volumes for user home directories
+**TODO:** This section doesn't create encrypted datasets yet.
+**TODO:** Idealy our pam login script will create these volumes for us.
+
+We setup three parent datasets:
+* UserHomes: User home directories go in here
+* UserDownloads: Keep the users "Downloads" directory separated.  We won't
+  snapshot or backup this dataset nearly as often as the other data in the
+  user's home directory
+* UserCache: Again, keep the users ".cache" directory separated.  We won't
+  snapshot or backup this dataset nearly as often as the other data in the
+  user's home directory
+```
+sudo zfs create SSD1/UserHomes
+sudo zfs create SSD1/UserDownloads
+sudo zfs create SSD1/UserCache
+sudo zfs create -o mountpoint=/home/shaun SSD1/UserHomes/shaun
+sudo zfs create -o mountpoint=/home/shaun/.cache SSD1/UserCache/shaun
+sudo zfs create -o mountpoint=/home/shaun/.local SSD1/UserHomes/shaun/.local
+sudo zfs create -o mountpoint=/home/shaun/Desktop SSD1/UserHomes/shaun/Desktop
+sudo zfs create -o mountpoint=/home/shaun/Documents SSD1/UserHomes/shaun/Documents
+sudo zfs create -o mountpoint=/home/shaun/Downloads SSD1/UserDownloads/shaun
+sudo zfs create -o mountpoint=/home/shaun/Music SSD1/UserHomes/shaun/Music
+sudo zfs create -o mountpoint=/home/shaun/Pictures SSD1/UserHomes/shaun/Pictures
+sudo zfs create -o mountpoint=/home/shaun/Videos SSD1/UserHomes/shaun/Videos
+```
+
 ## Limit ZFS ARC memory usage
 ```
 echo "options zfs zfs_arc_max=536870912" | sudo tee -a /etc/modprobe.d/zfs.conf
+```
+
+## Disable "resume"
+I don't intend to use hibernation and I'm not sure the setup we have can support
+it.  The boot process looks for a resume image in the swap volume *before* the
+zfs volume that the swap is on is unlocked.  There might be a way to fix the
+order but I simply don't have a use for the feature.
+
+Further, the boot process pauses for about 20 seconds while it tries to find the
+resume info, which it will fail to do.  Let's just remove that part form the
+boot process and move on.
+
+```
+sudo rm /usr/share/initramfs-tools/hooks/resume
+sudo rm /usr/share/initramfs-tools/scripts/local-premount/resume
+```
+
+## Backups using Znapzend
+```
+sudo useradd -m -r -d /var/lib/znapzend znapzend
+sudo cp /lib/systemd/system/znapzend.service /etc/systemd/system/
+sudo vim /etc/systemd/system/znapzend.service
+```
+```
+# might be neccessary on low power systems
+Nice=19
+IOSchedulingClass=2
+IOSchedulingPriority=7
+# more paranoid setting: don't run as root
+User=znapzend
+Group=znapzend
+```
+```
+sudo systemctl daemon-reload
+sudo zfs allow znapzend destroy,hold,mount,send,snapshot,userprop SSD1/UserHomes
+```
+```
+sudo vim /etc/default/znapzend
+```
+```
+ZNAPZENDOPTIONS="--autoCreation --features=recvu,compressed"
+```
+
+Because our datasets have different uses, we will create backup plans for each
+dataset (or hierarchy of datasets).  For SSD1/OS, where our booted OS lives, a
+daily snapshot that is kept for 14 days is more then sufficient:
+```
+sudo znapzendzetup create \
+  --tsformat='%Y-%m-%d-%H%M%S' \
+  --send-delay="$(( $RANDOM % 3600 ))" \
+  SRC '7d=>1d' SSD1/OS/kdeneon/ROOT
+```
+The `--send-delay` argument,that we feed a random number between 0 and 3600,
+makes znapzend wait that many seconds after taking the scheduled snapshot before
+sending said snapshot to remote storage.  This delay stops the sending and
+receiving systems generating a lot of load right on the hour and then being idle
+for the rest of the hour.  It spreads things out and smooths out load and
+network traffic a bit.
+
+Our user home directories (except .cache and Downloads) get frequent snapshots
+with long retention (hourly for 30 days, 6 hourly for 90 days, daily for a
+year):
+```
+sudo znapzendzetup create --recursive \
+  --tsformat='%Y-%m-%d-%H%M%S' \
+  --send-delay="$(( $RANDOM % 3600 ))" \
+  SRC '30d=>1h,90d=>6h,1y->1d' SSD1/UserHomes
+```
+
+Finally, our VMs and Containers get simple daily snapshots, kept for one week:
+```
+sudo znapzendzetup create --recursive \
+  --tsformat='%Y-%m-%d-%H%M%S' \
+  --send-delay="$(( $RANDOM % 3600 ))" \
+  SRC '7d=>1d' SSD1/Containers
+sudo znapzendzetup create --recursive \
+  --tsformat='%Y-%m-%d-%H%M%S' \
+  --send-delay="$(( $RANDOM % 3600 ))" \
+  SRC '7d=>1d' SSD1/VMs
+```
+
+Start the znapzend service and wait for it to run the forst backup:
+```
+sudo systemctl start znapzend
 ```
 
 ## Permanently add an entry to the Grub menu
@@ -246,6 +392,12 @@ vim ~/.zshrc
 ZSH_THEME="agnoster"
 ```
 
+I encountered a slight issue when ZSH is my default shell.  None of the icons,
+etc. for installed snaps show up in the Latte-Dock application menu.  This is
+because ZSH doesn't include `/var/lib/snapd/desktop` in the `XDG_DATA_DIRS`
+environment variable.  To work around this I restore my default shell back to
+bash but configure Konsole to launch ZSH as it's startup command.
+
 ### Add an action to the KDE panel so that when you mouse over and then scrollwheel, it moves between virtual desktops
 ```
 vim .config/plasma-org.kde.plasma.desktop-appletsrc
@@ -263,6 +415,12 @@ sudo ufw enable
 sudo ufw allow ssh
 ```
 
+For KDE connect:
+```
+sudo ufw allow 1714:1764/udp
+sudo ufw allow 1714:1764/tcp
+```
+
 ### Extra Packages
 ```
 sudo apt install gvfs-backends zenity gvfs-fuse expect
@@ -278,7 +436,7 @@ flatpak run --user org.remmina.Remmina
 
 ### Unlock all SSH private keys on login by having their passwords stored in kwallet
 ```
-vim .config/autostart/ssh-add.sh
+vim .config/autostart-scripts/ssh-add.sh
 ```
 ```
 #!/bin/bash
@@ -289,7 +447,7 @@ while read identity; do
 done < <(find ${HOME}/.ssh/identities -maxdepth 1 -mindepth 1 | grep -v '\.pub$')
 ```
 ```
-chmod +x .config/autostart/ssh-add.sh
+chmod +x .config/autostart-scripts/ssh-add.sh
 ```
 
 The first time the script runs, it will ask for the password for every private
@@ -320,7 +478,7 @@ sudo apt install virt-manager
 **Upon further reading, I'm convinced that ZVOLs are not the best solution for
 providing VM storage.  Stick with .qcow2 files on ZFS Datasets.**  I still think
 that the additional options for creating the ZFS Datasets for TEMP/SWAP are a
-good approach to optimise throughput for these tasks and minimize disk image
+good approach to optimise throughput for these tasks and minimise disk image
 changes that increase the size of incremental backups.
 
 Create a ZFS dataset for VMs (even though the VMs themselves will use ZVOLs)
@@ -376,4 +534,16 @@ vim /tmp/brLAN.xml
 virsh -c qemu:///system net-define /tmp/brLAN.xml
 virsh -c qemu:///system net-start brLAN
 virsh -c qemu:///system net-autostart brLAN
+```
+
+### LXD
+#### Create a dataset
+For this task, we will still use an encrypted dataset but we will store the key in the root filesystem.  This means that, once the root dataset is unlocked, this filesystem can be automatically unlocked without additional user input.
+```
+sudo mkdir -p /etc/zfs/keys
+sudo dd if=/dev/random of=/etc/zfs/keys/SSD1_Containers bs=1 count=32
+sudo chmod 700 /etc/zfs/keys
+sudo chmod 600 /etc/zfs/keys/*
+sudo zfs create -o encryption=on -o keyformat=raw -o keylocation=file:////etc/zfs/keys/SSD1_Containers SSD1/Containers
+sudo zfs create SSD1/Containers/LXD
 ```
