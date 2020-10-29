@@ -1,0 +1,27 @@
+function list_recursive(root, filteruser)
+  for child in zfs.list.children(root) do
+    list_recursive(child, filteruser)
+  end
+
+  userhome, src  = zfs.get_prop(root, "net.ghanima:userhome")
+  userhomedir, src  = zfs.get_prop(root, "net.ghanima:userhomedir")
+  if (filteruser ~= nil) then
+    if (filteruser == userhome) then
+      results[root] = {}
+      results[root]["net.ghanima:userhome"] = userhome
+      results[root]["net.ghanima:userhomedir"] = userhomedir
+    end
+  elseif (userhome ~= nil) then
+    results[root] = {}
+    results[root]["net.ghanima:userhome"] = userhome
+    results[root]["net.ghanima:userhomedir"] = userhomedir
+  end
+end
+
+args = ...
+argv = args["argv"]
+
+results = {}
+list_recursive(argv[1], argv[2])
+
+return results

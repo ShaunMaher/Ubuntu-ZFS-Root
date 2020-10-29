@@ -1,30 +1,129 @@
 #!/bin/bash
 
-home_zpool="SSD1"
-home_dataset="UserHomes"
-
-# This array defines the structure of a user's home directory.
-declare -A userdatasets
-# By default, a single dataset is created in ${home_zpool}/${home_dataset}
-userdatasets[_root]="${home_zpool}/${home_dataset}/{username}"
-
-#user_home_dataset="${home_zpool}/${home_dataset}/${PAM_USER}"
-
-# To override any of the above settings, define them in 
-#  /etc/default/zfs-userhomes
-if [ -f /etc/default/zfs-userhomes ]; then
-  source /etc/default/zfs-userhomes
-fi
+# Suggested attribute layout
+# net.ghanima:userhome = 'shaun'
+# net.ghanima:userhomedir = '/' or '/Downloads/'
+# net.ghanima:ssh_authorized_keys = 'ecdsa....'
 
 function log {
   echo "$(date) ${@}" >>/tmp/mount-zfs-home
   #echo "${@}" | logger
   #echo "${@}"
 }
+
+function zfs_list_userhomes {
+  # This may seem overly complicated since just using "zfs list" and parsing the
+  #  text output is a reasonably simple task, but this method, using a channel
+  #  program to provide json formatted output and then passing that to the jq
+  #  json parser, provides some safety measures such as handling unexpected
+  #  characters in values.
+  # We will ultimately end up with a mix of parsing command line tool output and
+  #  passing around json.  This is because, at least at the time of writing, not
+  #  all of the required functions exist in the channel program api.
+  # The following properties are not returned by the "zfs.get_prop" function:
+  #   * mounted
+  #   * encryptionroot
+  # There appears to be no way to enumerate zpools
+
+  readarray -t zpools < <(zpool list -o name | tail -n +2)
+  for zpool in "${zpools[@]}"; do
+    read -r -d '' zfs_rlist <<-ZFSRLIST
+      function list_recursive(root, filteruser)
+        for child in zfs.list.children(root) do
+          list_recursive(child, filteruser)
+        end
+
+        userhome, src  = zfs.get_prop(root, "${zfs_attribute_prefix}userhome")
+        userhomedir, src  = zfs.get_prop(root, "${zfs_attribute_prefix}userhomedir")
+        encryptionroot, src  = zfs.get_prop(root, "mounted")
+        if (filteruser ~= nil) then
+          if (filteruser == userhome) then
+            results[root] = {}
+            results[root]["${zfs_attribute_prefix}userhome"] = userhome
+            results[root]["${zfs_attribute_prefix}userhomedir"] = userhomedir
+            results[root]["encryptionroot"] = encryptionroot
+          end
+        elseif (userhome ~= nil) then
+          results[root] = {}
+          results[root]["${zfs_attribute_prefix}userhome"] = userhome
+          results[root]["${zfs_attribute_prefix}userhomedir"] = userhomedir
+          results[root]["encryptionroot"] = encryptionroot
+        end
+      end
+
+      results = {}
+      list_recursive("${zpool}", "${PAM_USER}")
+
+      return results
+ZFSRLIST
+
+    #echo "${zfs_rlist}"
+    json=$(echo "${zfs_rlist}" | zfs program -n -j "${zpool}" - "${zpool}")
+    echo "${json}" | jq
+  done
+}
+
+function mount_home {
+  root_only=${1}
+
+  # Find all datasets that belong to this user
+  # zfs list -o name,net.ghanima:userhome | awk '{print $2}' | grep "^${PAM_USER}\$"
+  readarray -t userhomes < <(zfs list -o name,${zfs_attribute_prefix}userhome,{$zfs_attribute_prefix}userhomedir) | ##grep for username)
+  for userhome in "${userhomes[@]}"; do
+    userhome=(${userhome})
+    dataset=${userhome[0]}
+    userhomedir=${userhome[2]}
+    userhome=${userhome[1]}
+
+    if [ "${userhomedir}" == '/' ]; then
+      # If we're *not* processing the root on this pass
+      if [ $root_only -lt 1 ]; then
+        next
+      fi
+      root_found=1
+    else
+      # If we're *only* processing the root on this pass
+      if [ $root_only -ge 1 ]; then
+        next
+      fi
+    fi
+
+    # Check that overlay is set to on
+    zfs set overlay=on "${dataset}"
+
+    # Check that mountpoint is set to legacy
+    zfs set mountpoint=legacy "${dataset}"
+
+    # Get the encryptionroot
+    encryptionroot=$(zfs get encryptionroot "${dataset}" | tail -1 | awk '{print $3}')
+
+    # Get encryption key status
+    keystatus=$(zfs get keystatus "${encryptionroot}" | tail -1 | awk '{print $3}' | grep -c "available")
+
+    # If the encryptionroot is set and the keystatus is not "available" and ${PAM_AUTHOK} is set
+    if [ $keystatus -lt 1 ] && [ "${PAM_AUTHOK}" != "" ]; then
+      log "Attempting to \"zfs load-key \"${encryptionroot}\""
+      echo "${PAM_AUTHOK}" | zfs load-key "${encryptionroot}"
+    elif [ $keystatus -gt 0 ]; then
+      log "Encryption key for \"${encryptionroot}\" is already loaded"
+    elif [ "${PAM_AUTHTOK}" == "" ]; then
+      log "\${PAM_AUTHTOK} not set in environment.  Cannot load key for \"${encryptionroot}\""
+    fi
+
+    # mount
+    mount -t zfs "${dataset}" "${user_home_mountpoint}/${userhomedir}"
+  done
+}
+
 log "libpam-script called: $0, ${PAM_USER}"
 
+root_found=0
 user_home_mountpoint=$(getent passwd "${PAM_USER}" | awk 'BEGIN{FS=":"}{print $(NF-1)}')
 uid=$(id -u "${PAM_USER}")
+zfs_attribute_prefix="net.ghanima:"
+
+zfs_list_userhomes
+exit 1
 
 # Users with ID's less than 1000 are typically system users
 if [ $uid -lt 1000 ]; then
@@ -32,49 +131,12 @@ if [ $uid -lt 1000 ]; then
   exit 0
 fi
 
-user_home_dataset=$(echo "${userdatasets[_root]}" | sed "s/{username}/${PAM_USER}/g")
-log "Expected home dataset for ${PAM_USER}: '${user_home_dataset}'"
-if [ $(zfs list | grep -c "${user_home_dataset}") -gt 0 ]; then
-  log "Found a home dataset for '${PAM_USER}' in '${user_home_dataset}'"
+# Attempt to mount the root directory of the user home
+mount_home 1
 
-  #TODO: check that mountpoint property is correct (legacy)
+if [ $root_found -lt 1 ]; then
+  # A home directory for this user doesn't exist.  If possible, create one.
 
-  #TODO: check that overlay property is set to "yes"
-
-  # Is the dataset already mounted
-  if [ $(zfs get mounted "${user_home_dataset}" | tail -1 | awk '{print $3}' | grep -c "yes") -gt 0 ]; then
-    log "Dataset for '${PAM_USER}' is already mounted."
-    exit 0
-  else
-    # Is the dataset encrypted?
-    if [ $(zfs get encryptionroot "${user_home_dataset}" | tail -1 | awk '{print $3}' | grep -c "{$home_zpool}") -gt 0 ]; then
-      log "Dataset for '${PAM_USER}' is encrypted."
-      encryptionroot=$(zfs get encryptionroot "${user_home_dataset}" | tail -1 | awk '{print $3}')
-      # Is the key already loaded?
-      if [ $(zfs get keystatus "${encryptionroot}" | tail -1 | awk '{print $3}' | grep -c "available") -gt 0 ]; then
-        log "Encryption key for '${PAM_USER}' home dataset is already loaded"
-      else
-        log "Encryption key for '${PAM_USER}' home dataset is not already loaded."
-
-	#TODO: Load the key from ${PAM_AUTHOK}
-      fi
-    fi
-    
-    #TODO: Ready to mount the dataset
-    #mount -t zfs "${user_home_dataset}" "${user_home_mountpoint}"
-  fi
-else
-  log "There is no home dataset for '${PAM_USER}'"
-  if [ "${PAM_AUTHTOK}" = "" ]; then
-    log "PAM_AUTHTOK is not set.  Cannot create encrypted datasets without password."
-    exit 0
-  fi
-
-  # TODO: make sure parent datasets exist
-
-  # Create the root dataset for the user's home directory
-  homedataset=$(echo "${userdatasets[_root]}" | sed "s/{username}/${PAM_USER}/g")
-  log "Creating a new home dataset for '${PAM_USER}' in '${homedataset}'"
   result=$(
     echo "${PAM_AUTHTOK}" | \
     zfs create \
@@ -82,16 +144,18 @@ else
       -o keyformat=passphrase \
       -o mountpoint=legacy \
       -o overlay=on \
-      "${homedataset}" \
+      -o devices=off \
+      -o setuid=off \
+      -o "${zfs_attribute_prefix}userhome"="${PAM_USER}" \
+      -o "${zfs_attribute_prefix}userhomedir"="/" \
+      "${TODO}" \
     2>&1
   )
   log "$?: ${result}"
 
-  #for target in "${!userdatasets[@]}"; do
-  #  newdataset=$(echo "${userdatasets[${target}]}" | sed "s/{username}/${PAM_USER}/g")
-  #  log "Creating a new '${target}' dataset for '${PAM_USER}' in '${newdataset}'"
-  #  echo "${PAM_AUTHOK}" | zfs create -o encryption=on -o keyformat=passphrase -o mountpoint=legacy -o overlay=yes "${newdataset}"
-  #done
-
-  #TODO: Copy in a .skel profile
+  # Then run the mount_home function again
+  mount_home 1
 fi
+
+# Attempt to mount the sub-directories of the user home
+mount_home 0
